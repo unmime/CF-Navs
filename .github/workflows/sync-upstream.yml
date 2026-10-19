@@ -4,9 +4,14 @@ on:
   schedule:
     - cron: '17 3,9,15,21 * * *'   # 每 6 小时一次，错峰避免整点拥堵
   workflow_dispatch:
+    inputs:
+      force_push:
+        description: '创建空提交强制推送一次，用于验证部署密钥写权限（自检）'
+        type: boolean
+        default: false
 
 permissions:
-  contents: write
+  contents: read
 
 concurrency:
   group: sync-upstream
@@ -21,7 +26,10 @@ jobs:
         with:
           ref: main
           fetch-depth: 0
-          token: ${{ secrets.GITHUB_TOKEN }}
+          # 必须用读写部署密钥（SSH）：GITHUB_TOKEN 是 GitHub App 令牌，没有 workflows 权限，
+          # 推送包含 .github/workflows/* 的上游提交会被拒绝：
+          #   refusing to allow a GitHub App to create or update workflow ... without `workflows` permission
+          ssh-key: ${{ secrets.SYNC_DEPLOY_KEY }}
 
       - name: Configure git
         run: |
@@ -29,6 +37,8 @@ jobs:
           git config user.email "github-actions[bot]@users.noreply.github.com"
 
       - name: Merge upstream main (no force push)
+        env:
+          FORCE_PUSH: ${{ inputs.force_push }}
         run: |
           git remote add upstream https://github.com/lbjxr/CF-Navs.git || git remote set-url upstream https://github.com/lbjxr/CF-Navs.git
           git fetch upstream --tags
@@ -36,6 +46,13 @@ jobs:
           if git merge-base --is-ancestor upstream/main HEAD; then
             echo "Already up to date with upstream."
           else
-            git merge upstream/main --no-edit -X theirs || git merge upstream/main --abort
+            if ! git merge upstream/main --no-edit -X theirs; then
+              git merge --abort
+              echo "::error::合并上游失败，已中止，未推送任何内容"
+              exit 1
+            fi
           fi
-          git push origin main
+          if [ "$FORCE_PUSH" = "true" ]; then
+            git commit --allow-empty -m "chore: sync self-check $(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          fi
+          git push origin HEAD:main
